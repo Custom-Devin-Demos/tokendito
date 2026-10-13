@@ -70,3 +70,21 @@ gcp_project_number = 123456789012
 gcp_pool_id = okta-pool
 gcp_provider_id = okta
 ```
+
+## Credential cache
+
+The following keys control the optional credential cache. See [cache.md](cache.md) for details on where data is stored and the security implications.
+
+| Key | Default | Description |
+|---|---|---|
+| `cache_enabled` | `false` | Enable caching of credentials between invocations. |
+| `cache_store` | `keyring` | `keyring` (OS keychain, falling back to `file` if unavailable), `file` (0600 JSON files in the user cache directory) or `none`. |
+| `cache_service_name` | `tokendito` | Service name used for OS keychain entries. |
+| `cache_refresh_skew` | `300` | Seconds before expiry at which cached credentials are refreshed. |
+
+```
+[default]
+okta_org = https://acme.okta.com/
+cache_enabled = true
+cache_store = keyring
+```
