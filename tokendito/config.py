@@ -67,6 +67,7 @@ class Config(object):
             scopes="https://www.googleapis.com/auth/cloud-platform",
             token_lifetime=3600,
             credentials_file=None,
+            subject_token="id_token",
         ),
         azure=dict(
             tenant_id=None,

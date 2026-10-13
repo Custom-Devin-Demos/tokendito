@@ -78,6 +78,7 @@ def test_config_backend_sections():
         "scopes": "https://www.googleapis.com/auth/cloud-platform",
         "token_lifetime": 3600,
         "credentials_file": None,
+        "subject_token": "id_token",
     }
     assert pytest_config.azure == {
         "tenant_id": None,

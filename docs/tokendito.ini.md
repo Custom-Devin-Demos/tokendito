@@ -47,6 +47,7 @@ environment variables. See [Cloud backends](README.md#cloud-backends).
 | `gcp_scopes` | `https://www.googleapis.com/auth/cloud-platform` | OAuth scopes for the GCP access token. |
 | `gcp_token_lifetime` | `3600` | Access token lifetime, in seconds. |
 | `gcp_credentials_file` | `<user_config_dir>/gcp/<profile>.json` | Where to write the ADC `external_account` file. |
+| `gcp_subject_token` | `id_token` | Okta token sent to Google STS: `id_token`, or `access_token` (custom authorization server only, sent as a `jwt`). |
 | `azure_tenant_id` | (none) | Entra ID tenant ID. See [backends/azure.md](backends/azure.md). |
 | `azure_client_id` | (none) | Entra ID application (client) ID with the federated credential. |
 | `azure_scope` | `https://management.azure.com/.default` | Scope requested from Entra ID. |

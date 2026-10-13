@@ -128,7 +128,7 @@ def test_add_backend_arguments(mocker):
 
     def add_arguments(parser):
         group = parser.add_argument_group("pytest")
-        group.add_argument("--gcp-pool-id", dest="gcp_pool_id")
+        group.add_argument("--cache-pytest-hook", dest="cache_pytest_hook")
 
     module = types.SimpleNamespace(add_arguments=add_arguments)
     mocker.patch.dict(backends._BUILTIN, {"pytest_hook": "pytest_hook_module"})
@@ -141,7 +141,7 @@ def test_add_backend_arguments(mocker):
     parser = argparse.ArgumentParser()
     called = backends.add_backend_arguments(parser)
     assert "pytest_hook" in called
-    assert parser.parse_args(["--gcp-pool-id", "pool"]).gcp_pool_id == "pool"
+    assert parser.parse_args(["--cache-pytest-hook", "pool"]).cache_pytest_hook == "pool"
 
 
 def test_credentials_round_trip():
