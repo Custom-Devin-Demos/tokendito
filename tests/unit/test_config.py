@@ -57,3 +57,59 @@ def test_config_object():
     sys.stdin = None
     pytest_config = Config()
     assert pytest_config.user["encoding"] == "utf-8"
+
+
+def test_config_backend_sections():
+    """Test that the backend related sections and keys exist with their defaults."""
+    from tokendito.config import Config
+
+    pytest_config = Config()
+    assert Config.get_sections() == ["user", "aws", "okta", "gcp", "azure", "cache"]
+    assert pytest_config.user["backend"] == "aws"
+    assert pytest_config.okta["oidc_client_id"] is None
+    assert pytest_config.okta["oidc_scopes"] == "openid profile"
+    assert pytest_config.okta["oidc_authorization_server"] is None
+    assert pytest_config.okta["oidc_redirect_uri"] == "http://localhost:8765/callback"
+    assert pytest_config.gcp == {
+        "project_number": None,
+        "pool_id": None,
+        "provider_id": None,
+        "service_account_email": None,
+        "scopes": "https://www.googleapis.com/auth/cloud-platform",
+        "token_lifetime": 3600,
+        "credentials_file": None,
+    }
+    assert pytest_config.azure == {
+        "tenant_id": None,
+        "client_id": None,
+        "scope": "https://management.azure.com/.default",
+        "authority_host": "https://login.microsoftonline.com",
+        "audience": "api://AzureADTokenExchange",
+        "token_file": None,
+    }
+    assert pytest_config.cache == {
+        "enabled": False,
+        "store": "keyring",
+        "service_name": "tokendito",
+        "refresh_skew": 300,
+        "store_okta_password": False,
+    }
+
+
+def test_config_init_all_sections():
+    """Test that partially initialised objects still contain every section."""
+    from tokendito.config import Config
+
+    pytest_config = Config(gcp={"pool_id": "pool"})
+    for section in Config.get_sections():
+        assert isinstance(getattr(pytest_config, section), dict)
+    assert pytest_config.gcp == {"pool_id": "pool"}
+    assert pytest_config.azure == {}
+
+    merged = Config()
+    merged.update(pytest_config)
+    assert merged.gcp["pool_id"] == "pool"
+    assert merged.gcp["token_lifetime"] == 3600
+
+    with pytest.raises(ValueError):
+        Config(cache={"pytest": "pytest"})

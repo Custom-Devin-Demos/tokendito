@@ -1520,3 +1520,273 @@ def test_configure_list_process_options_dispatch(mocker):
 
     # configure_list was called before sys.exit
     mock_list.assert_called_once_with(args)
+
+
+def test_backend_cli_arguments():
+    """Test the --backend and Okta OIDC command line arguments."""
+    from tokendito import user
+
+    args = user.parse_cli_args([])
+    assert args.user_backend is None
+
+    args = user.parse_cli_args(
+        [
+            "--backend",
+            "gcp",
+            "--okta-oidc-client-id",
+            "pytest_client",
+            "--okta-oidc-scopes",
+            "openid email",
+            "--okta-oidc-authorization-server",
+            "default",
+            "--okta-oidc-redirect-uri",
+            "http://localhost:1234/cb",
+        ]
+    )
+    ret = user.process_arguments(args)
+    assert ret.user["backend"] == "gcp"
+    assert ret.okta["oidc_client_id"] == "pytest_client"
+    assert ret.okta["oidc_scopes"] == "openid email"
+    assert ret.okta["oidc_authorization_server"] == "default"
+    assert ret.okta["oidc_redirect_uri"] == "http://localhost:1234/cb"
+
+    with pytest.raises(SystemExit):
+        user.parse_cli_args(["--backend", "pytest_unknown"])
+
+
+def test_read_arguments_config_sections():
+    """Test that CLI dests are gated on Config sections, not submodule names."""
+    from argparse import Namespace
+
+    from tokendito import user
+
+    args = Namespace(
+        gcp_pool_id="pool",
+        azure_tenant_id="tenant",
+        cache_enabled=True,
+        backends_pytest="ignored",
+        multi_profiles=None,
+    )
+    ret = user.process_arguments(args)
+    assert ret.gcp["pool_id"] == "pool"
+    assert ret.azure["tenant_id"] == "tenant"
+    assert ret.cache["enabled"] is True
+    assert not hasattr(ret, "backends")
+
+
+def test_process_environment_backend_sections(monkeypatch):
+    """Test that environment variables for the new sections are interpreted."""
+    import os
+
+    from tokendito import user
+
+    env = dict(
+        TOKENDITO_USER_BACKEND="gcp",
+        TOKENDITO_GCP_POOL_ID="pool",
+        TOKENDITO_GCP_TOKEN_LIFETIME="1800",
+        TOKENDITO_AZURE_TENANT_ID="tenant",
+        TOKENDITO_CACHE_ENABLED="true",
+        TOKENDITO_OKTA_OIDC_CLIENT_ID="client",
+    )
+    monkeypatch.setattr(os, "environ", env)
+    ret = user.process_environment()
+    assert ret.user["backend"] == "gcp"
+    assert ret.gcp["pool_id"] == "pool"
+    assert ret.azure["tenant_id"] == "tenant"
+    assert ret.okta["oidc_client_id"] == "client"
+
+    user.coerce_config_types(ret)
+    assert ret.gcp["token_lifetime"] == 1800
+    assert ret.cache["enabled"] is True
+
+
+def test_process_ini_file_backend_sections(tmpdir):
+    """Test that ini keys for the new sections map to the right Config sections."""
+    from tokendito import user
+
+    ini_file = tmpdir.join("tokendito.ini")
+    ini_file.write(
+        "[default]\n"
+        "user_backend = azure\n"
+        "okta_oidc_authorization_server = default\n"
+        "gcp_pool_id = pool\n"
+        "gcp_service_account_email = sa@pytest.iam.gserviceaccount.com\n"
+        "azure_client_id = client\n"
+        "cache_refresh_skew = 120\n"
+        "cache_store = file\n"
+    )
+    ret = user.process_ini_file(str(ini_file), "default")
+    assert ret.user["backend"] == "azure"
+    assert ret.okta["oidc_authorization_server"] == "default"
+    assert ret.gcp["pool_id"] == "pool"
+    assert ret.gcp["service_account_email"] == "sa@pytest.iam.gserviceaccount.com"
+    assert ret.azure["client_id"] == "client"
+    assert ret.cache["store"] == "file"
+    assert user.coerce_config_types(ret).cache["refresh_skew"] == 120
+
+
+@pytest.mark.parametrize(
+    "section, key, value, expected",
+    [
+        ("gcp", "token_lifetime", "600", 600),
+        ("gcp", "token_lifetime", "pytest", 3600),
+        ("cache", "refresh_skew", None, 300),
+        ("cache", "enabled", "1", True),
+        ("cache", "enabled", "no", False),
+        ("cache", "enabled", True, True),
+    ],
+)
+def test_coerce_config_types(section, key, value, expected):
+    """Test type conversion of ini and environment values."""
+    from tokendito import user
+    from tokendito.config import Config
+
+    pytest_config = Config(**{section: {key: value}})
+    user.coerce_config_types(pytest_config)
+    assert getattr(pytest_config, section)[key] == expected
+
+
+def test_validate_quiet_configuration_backend():
+    """Test that the AWS role ARN is only required in quiet mode for the AWS backend."""
+    from tokendito import user
+    from tokendito.config import Config
+
+    pytest_config = Config(
+        user={"quiet": True, "backend": "gcp"},
+        aws={"role_arn": None},
+        okta={"mfa": "push", "mfa_response": None},
+    )
+    assert user.validate_quiet_configuration(pytest_config) == []
+
+    pytest_config.user["backend"] = "aws"
+    assert user.validate_quiet_configuration(pytest_config) == ["AWS role ARN not set"]
+
+
+def test_validate_configuration_with_backend(mocker):
+    """Test that backend validation messages are merged."""
+    from tokendito import user
+    from tokendito.config import Config
+
+    pytest_config = Config(
+        user={"quiet": False},
+        okta={
+            "username": "pytest",
+            "password": "pytest",
+            "org": "https://acme.okta.org",
+            "tile": None,
+        },
+    )
+    backend = mocker.Mock()
+    backend.validate.return_value = ["Backend setting not set"]
+    assert user.validate_configuration(pytest_config) == []
+    assert user.validate_configuration(pytest_config, backend) == ["Backend setting not set"]
+
+
+def test_process_args_backend_flow(mocker):
+    """Test that process_args drives the selected backend."""
+    from argparse import Namespace
+
+    from tokendito import user
+    from tokendito.config import config
+
+    mocker.patch("tokendito.user.process_options")
+    mocker.patch("tokendito.user.setup_logging")
+    mocker.patch("tokendito.user.validate_basic_configuration", return_value=[])
+    mocker.patch.dict(config.user, {"backend": "aws", "use_device_token": False, "quiet": False})
+    mocker.patch.dict(config.okta, {"org": "https://acme.okta.org/"})
+    backend = mocker.Mock()
+    backend.validate.return_value = []
+    backend_class = mocker.Mock(return_value=backend)
+    m_get = mocker.patch("tokendito.backends.get_backend", return_value=backend_class)
+    m_access = mocker.patch("tokendito.okta.access_control")
+    mocker.patch("tokendito.user.HTTP_client.get_device_token", return_value=None)
+
+    user.process_args(Namespace(user_config_profile="default"), False)
+
+    m_get.assert_called_once_with("aws")
+    backend_class.assert_called_once_with(config)
+    m_access.assert_called_once_with(config)
+    credentials = backend.authenticate.return_value
+    backend.write.assert_called_once_with(credentials)
+    backend.display.assert_called_once_with(credentials)
+    assert config.okta["org"] == "https://acme.okta.org"
+
+    # skip_auth does not call Okta again
+    m_access.reset_mock()
+    user.process_args(Namespace(user_config_profile="default"), True)
+    m_access.assert_not_called()
+
+
+def test_process_args_backend_validation_failure(mocker):
+    """Test that backend validation errors stop processing before contacting Okta."""
+    from argparse import Namespace
+
+    from tokendito import user
+    from tokendito.config import config
+
+    mocker.patch("tokendito.user.process_options")
+    mocker.patch("tokendito.user.setup_logging")
+    mocker.patch("tokendito.user.validate_basic_configuration", return_value=[])
+    mocker.patch.dict(config.user, {"backend": "aws", "quiet": False})
+    backend = mocker.Mock()
+    backend.validate.return_value = ["pytest error"]
+    mocker.patch("tokendito.backends.get_backend", return_value=mocker.Mock(return_value=backend))
+    m_access = mocker.patch("tokendito.okta.access_control")
+
+    with pytest.raises(SystemExit) as err:
+        user.process_args(Namespace(user_config_profile="default"), False)
+    assert err.value.code == 1
+    m_access.assert_not_called()
+
+
+def test_device_token_helpers(mocker):
+    """Test loading and saving the device token."""
+    from argparse import Namespace
+
+    from tokendito import user
+    from tokendito.config import config
+
+    args = Namespace(user_config_profile="default")
+    mocker.patch.dict(config.user, {"use_device_token": True})
+    mocker.patch.dict(config.okta, {"org": "https://acme.okta.org", "device_token": "dt"})
+    m_set = mocker.patch("tokendito.user.HTTP_client.set_device_token")
+    user.load_device_token(args)
+    m_set.assert_called_once_with("https://acme.okta.org", "dt")
+
+    mocker.patch("tokendito.user.HTTP_client.get_device_token", return_value="new_dt")
+    m_update = mocker.patch("tokendito.user.update_device_token")
+    user.save_device_token(args)
+    assert config.okta["device_token"] == "new_dt"
+    m_update.assert_called_once_with(config)
+
+
+def test_configure_list_backend_sections(capsys, mocker, tmpdir):
+    """Test that configure_list displays all Config sections."""
+    import argparse
+
+    from tokendito import user
+
+    mocker.patch("tokendito.user._safe_load_ini", return_value=None)
+    mocker.patch("tokendito.user.process_environment", return_value=None)
+    args = argparse.Namespace(
+        user_config_file=str(tmpdir.join("tokendito.ini")), user_config_profile="default"
+    )
+    user.configure_list(args)
+    captured = capsys.readouterr()
+    for section in ("[gcp]", "[azure]", "[cache]"):
+        assert section in captured.out
+    assert "backend" in captured.out
+    assert "oidc_scopes" in captured.out
+
+
+def test_setup_logging_backend_loggers():
+    """Test that backend module loggers get the configured level and mask filter."""
+    import logging
+
+    from tokendito import user
+
+    user.setup_logging({"loglevel": "DEBUG"})
+    backend_logger = logging.getLogger("tokendito.backends.aws")
+    assert backend_logger.level == logging.DEBUG
+    assert any(isinstance(f, user.MaskLoggerSecret) for f in backend_logger.filters)
+    user.setup_logging({"loglevel": "INFO"})

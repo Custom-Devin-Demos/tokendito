@@ -42,6 +42,7 @@ from bs4 import BeautifulSoup
 import requests
 from tokendito import __version__
 from tokendito import aws
+from tokendito import backends
 from tokendito import okta
 from tokendito.config import Config
 from tokendito.config import config
@@ -58,6 +59,11 @@ def cmd_interface(args):
 
     # Early logging, in case the user requests debugging via env/CLI
     setup_early_logging(args)
+
+    if args.credential_process or args.daemon:
+        from tokendito import daemon
+
+        sys.exit(daemon.main(args))
 
     if args.multi_profiles:
         if args.aws_profile or ("TOKENDITO_AWS_PROFILE" in os.environ):
@@ -85,14 +91,71 @@ def cmd_interface(args):
 
 def process_args(args, skip_auth=False):
     """Process the args and allow for skipping auth with multiple profiles."""
+    backend, credentials = get_credentials(args, skip_auth)
+    backend.write(credentials)
+
+    save_device_token(args)
+
+    backend.display(credentials)
+
+
+def get_credentials(args, skip_auth=False):
+    """Load the configuration, authenticate to Okta and obtain the backend credentials.
+
+    Nothing is written to disk, except for what Okta authentication itself requires.
+
+    :param args: argparse namespace.
+    :param skip_auth: reuse the existing Okta session instead of authenticating again.
+    :return: tuple of (CredentialBackend instance, Credentials).
+    """
+    backend = load_backend(args)
+    return backend, authenticate_backend(args, backend, skip_auth)
+
+
+def load_backend(args):
+    """Load the configuration into the config singleton and create the selected backend.
+
+    :param args: argparse namespace.
+    :return: CredentialBackend instance.
+    """
     # Set some required initial values
     process_options(args)
 
     # Late logging (default)
     setup_logging(config.user)
 
+    return backends.get_backend(config.user["backend"])(config)
+
+
+def authenticate_backend(args, backend, skip_auth=False):
+    """Validate the configuration, authenticate to Okta and call the backend.
+
+    :param args: argparse namespace.
+    :param backend: CredentialBackend instance.
+    :param skip_auth: reuse the existing Okta session instead of authenticating again.
+    :return: Credentials object.
+    """
     # Validate configuration
-    message = validate_configuration(config)
+    validate_configuration_or_exit(config, backend)
+
+    # rm trailing / if provided as such so the urls with this as base dont have //
+    config.okta["org"] = config.okta["org"].strip("/")
+
+    load_device_token(args)
+
+    # get authentication and authorization cookies from okta
+    _ = skip_auth or okta.access_control(config)
+
+    return backend.authenticate()
+
+
+def validate_configuration_or_exit(config, backend=None):
+    """Validate the configuration, and exit with an error message if it is not valid.
+
+    :param config: Config object.
+    :param backend: CredentialBackend instance, or None.
+    """
+    message = validate_configuration(config, backend)
     if message:
         quiet_msg = ""
         if config.user["quiet"] is not False:
@@ -106,9 +169,12 @@ def process_args(args, skip_auth=False):
         )
         sys.exit(1)
 
-    # rm trailing / if provided as such so the urls with this as base dont have //
-    config.okta["org"] = config.okta["org"].strip("/")
 
+def load_device_token(args):
+    """Load the Okta device token into the HTTP client, if enabled.
+
+    :param args: argparse namespace.
+    """
     if config.user["use_device_token"]:
         device_token = config.okta["device_token"]
         if device_token:
@@ -119,43 +185,17 @@ def process_args(args, skip_auth=False):
                 "May see multiple MFA requests this time."
             )
 
-    # get authentication and authorization cookies from okta
-    _ = skip_auth or okta.access_control(config)
 
-    if config.okta["tile"]:
-        tile_label = ""
-        config.okta["tile"] = (config.okta["tile"], tile_label)
-    else:
-        config.okta["tile"] = discover_tiles(config.okta["org"])
+def save_device_token(args):
+    """Save the Okta device token to the configuration file, if enabled.
 
-    # Authenticate to AWS roles
-    auth_tiles = aws.authenticate_to_roles(config, config.okta["tile"])
-
-    role_response, role_name = aws.select_assumeable_role(auth_tiles)
-
-    identity = aws.assert_credentials(role_response=role_response)
-    if "Arn" not in identity and "UserId" not in identity:
-        logger.error(
-            f"There was an error retrieving and verifying AWS credentials: {role_response}"
-        )
-        sys.exit(1)
-
-    set_profile_name(config, role_name)
-
-    set_local_credentials(
-        response=role_response,
-        role=config.aws["profile"],
-        region=config.aws["region"],
-        output=config.aws["output"],
-    )
-
+    :param args: argparse namespace.
+    """
     device_token = HTTP_client.get_device_token()
     if config.user["use_device_token"] and device_token:
         logger.info(f"Saving device token to config profile {args.user_config_profile}")
         config.okta["device_token"] = device_token
         update_device_token(config)
-
-    display_selected_role(profile_name=config.aws["profile"], role_response=role_response)
 
 
 class MaskLoggerSecret(logging.Filter):
@@ -269,6 +309,24 @@ def parse_cli_args(args):
         found by tokendito. It is used in the authorize code flow.""",
     )
     parser.add_argument(
+        "--okta-oidc-client-id",
+        help="Okta OIDC native application client ID used by OIDC-based backends. "
+        "Defaults to the client ID found by tokendito.",
+    )
+    parser.add_argument(
+        "--okta-oidc-scopes",
+        help="Space separated OIDC scopes to request. Defaults to 'openid profile'.",
+    )
+    parser.add_argument(
+        "--okta-oidc-authorization-server",
+        help="Okta custom authorization server ID (e.g. 'default'). "
+        "Defaults to the Org authorization server.",
+    )
+    parser.add_argument(
+        "--okta-oidc-redirect-uri",
+        help="Redirect URI registered on the Okta OIDC application. It is never followed.",
+    )
+    parser.add_argument(
         "--okta-mfa",
         help="Sets the MFA method. You "
         "can also use the TOKENDITO_OKTA_MFA environment variable.",
@@ -300,6 +358,37 @@ def parse_cli_args(args):
         help="Login timeout in seconds (default: 0, which is disabled). "
         "You can also use the TOKENDITO_USER_LOGIN_TIMEOUT environment variable.",
     )
+    parser.add_argument(
+        "--backend",
+        dest="user_backend",
+        choices=sorted(backends._BUILTIN),
+        help="Credential backend to use. Defaults to aws. "
+        "You can also use the TOKENDITO_USER_BACKEND environment variable.",
+    )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--credential-process",
+        action="store_true",
+        default=False,
+        help="Print the credentials of --profile as a single JSON document on stdout, for use "
+        "as an AWS credential_process or an external credential source. Implies --quiet.",
+    )
+    mode_group.add_argument(
+        "--daemon",
+        action="store_true",
+        default=False,
+        help="Keep running, refreshing the credentials of --profile (or each --multi-profiles) "
+        "before they expire.",
+    )
+    parser.add_argument(
+        "--daemon-max-iterations",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
+    backends.add_backend_arguments(parser)
 
     parsed_args = parser.parse_args(args)
 
@@ -390,6 +479,7 @@ def setup_logging(conf):
     # with the same format and level. Settings are
     # inherited from the root logger.
     submodules = [f"tokendito.{x}" for x in get_submodule_names()]
+    submodules += backends.get_module_names()
     if "loglevel" in conf:
         conf["loglevel"] = conf["loglevel"].upper()
         for submodule in submodules:
@@ -783,7 +873,7 @@ def _read_arguments(args):
     for key, val in vars(args).items():
         match = re.search(pattern, key.lower())
         if match:
-            if match.group(1) not in get_submodule_names():
+            if match.group(1) not in Config.get_sections():
                 continue
             if match.group(1) not in res:
                 res[match.group(1)] = dict()
@@ -1410,7 +1500,7 @@ def configure_list(args):
     builtins.print(f"{'Name':>28s}    {'Value':30s}    {'Source':12s}    Location")
     builtins.print(f"{'----':>28s}    {'-----':30s}    {'------':12s}    --------")
 
-    for section in ["user", "aws", "okta"]:
+    for section in Config.get_sections():
         builtins.print(f"  [{section}]")
         section_data = getattr(merged, section)
 
@@ -1540,7 +1630,7 @@ def validate_quiet_configuration(config):
     """
     message = []
     if "quiet" in config.user and config.user["quiet"] is not False:
-        if not config.aws["role_arn"]:
+        if config.user.get("backend", "aws") == "aws" and not config.aws["role_arn"]:
             message.append("AWS role ARN not set")
         if not config.okta["mfa"]:
             message.append("MFA Method not set")
@@ -1550,14 +1640,17 @@ def validate_quiet_configuration(config):
     return message
 
 
-def validate_configuration(config):
+def validate_configuration(config, backend=None):
     """
     Ensure that configuration settings are appropriate before contacting the Okta endpoint.
 
     :param config: Config element with final configuration.
+    :param backend: optional CredentialBackend instance, whose validate() messages are added.
     :return: message with validation issues.
     """
     messages = validate_basic_configuration(config) + validate_quiet_configuration(config)
+    if backend is not None:
+        messages += backend.validate()
     return messages
 
 
@@ -1579,6 +1672,8 @@ def sanitize_config_values(config):
         config.aws["region"] = config.get_defaults()["aws"]["region"]
         logger.warning(f"AWS Region reset to {config.aws['region']}")
 
+    coerce_config_types(config)
+
     # Expand any "~", if given by the user
     if "config_dir" in config.user:
         config.user["config_dir"] = os.path.expanduser(config.user["config_dir"])
@@ -1591,6 +1686,42 @@ def sanitize_config_values(config):
             config.aws["shared_credentials_file"]
         )
 
+    return config
+
+
+_INTEGER_KEYS = (("gcp", "token_lifetime"), ("cache", "refresh_skew"))
+_BOOLEAN_KEYS = (("cache", "enabled"), ("cache", "store_okta_password"))
+
+
+def _to_bool(value):
+    """Convert ini/env style values such as "true", "1" or "yes" to a boolean."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def coerce_config_types(config):
+    """Convert string values from ini files and environment variables to their types.
+
+    Values that cannot be converted are reset to their defaults.
+
+    :param config: Config object to adjust
+    :returns: modified object.
+    """
+    defaults = config.get_defaults()
+    for section, key in _INTEGER_KEYS:
+        values = getattr(config, section)
+        if key not in values:
+            continue
+        try:
+            values[key] = int(values[key])
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid integer for {section}_{key}: {values[key]}. Using default.")
+            values[key] = defaults[section][key]
+    for section, key in _BOOLEAN_KEYS:
+        values = getattr(config, section)
+        if key in values:
+            values[key] = _to_bool(values[key])
     return config
 
 

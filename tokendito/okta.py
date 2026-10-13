@@ -759,6 +759,123 @@ def access_control(config):
         idp_authorize(oauth2_config, oauth2_session_data)
 
 
+def get_oidc_base_url(config):
+    """Get the base URL of the OIDC authorization server endpoints.
+
+    :param config: Config object
+    :return: "{org}/oauth2/v1" for the Org AS, or "{org}/oauth2/{id}/v1" for a custom AS.
+    """
+    org = config.okta["org"].strip("/")
+    server = config.okta.get("oidc_authorization_server")
+    if server:
+        return f"{org}/oauth2/{server}/v1"
+    return f"{org}/oauth2/v1"
+
+
+def get_oidc_client_id(config):
+    """Get the client ID of the Okta OIDC application. Exits if none can be found.
+
+    :param config: Config object
+    :return: client ID
+    """
+    client_id = config.okta.get("oidc_client_id") or get_client_id(config)
+    if not client_id:
+        logger.error(
+            "Could not determine the Okta OIDC client ID. "
+            "Please set okta_oidc_client_id and try again."
+        )
+        sys.exit(1)
+    return client_id
+
+
+def parse_oidc_authorize_response(response, state):
+    """Extract the authorization code from the Location header of an /authorize response.
+
+    :param response: response from /authorize, with redirects disabled.
+    :param state: state sent to /authorize.
+    :return: authorization code. Exits on error.
+    """
+    location = response.headers.get("Location", "")
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+    if "error" in query:
+        description = query.get("error_description", [""])[0]
+        logger.error(f"OIDC authorize error: {query['error'][0]}: {description}")
+        sys.exit(1)
+    if query.get("state", [None])[0] != state:
+        logger.error("OIDC authorize response state does not match the request.")
+        sys.exit(1)
+    if "code" not in query:
+        logger.error(f"No authorization code returned by OIDC authorize ({response.status_code}).")
+        sys.exit(1)
+    code = query["code"][0]
+    user.add_sensitive_value_to_be_masked(code)
+    return code
+
+
+def get_oidc_authorize_code(config, base_url, client_id, code_verifier):
+    """Request an authorization code using the existing Okta session.
+
+    :param config: Config object
+    :param base_url: authorization server base URL
+    :param client_id: OIDC client ID
+    :param code_verifier: PKCE code verifier
+    :return: authorization code
+    """
+    state = get_oauth2_state()
+    params = {
+        "client_id": client_id,
+        "redirect_uri": config.okta.get("oidc_redirect_uri"),
+        "response_type": get_response_type(),
+        "scope": config.okta.get("oidc_scopes") or "openid",
+        "state": state,
+        "nonce": get_oauth2_state(),
+        "code_challenge": get_pkce_code_challenge(code_verifier),
+        "code_challenge_method": get_pkce_code_challenge_method(),
+        "prompt": "none",
+    }
+    session_token = HTTP_client.session.cookies.get("sessionToken", None)
+    if session_token:
+        params["sessionToken"] = session_token
+
+    response = HTTP_client.get(f"{base_url}/authorize", params=params, allow_redirects=False)
+    return parse_oidc_authorize_response(response, state)
+
+
+def get_oidc_tokens(config):
+    """Get OIDC tokens from Okta with the authorization code + PKCE flow.
+
+    Must be called after access_control(config), as the Okta session is reused
+    (prompt=none). The redirect is not followed; the code is read from the Location header.
+
+    :param config: Config object
+    :return: dict with "id_token", "access_token" and "expires_in".
+    """
+    base_url = get_oidc_base_url(config)
+    client_id = get_oidc_client_id(config)
+    code_verifier = get_pkce_code_verifier()
+    code = get_oidc_authorize_code(config, base_url, client_id, code_verifier)
+
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": config.okta.get("oidc_redirect_uri"),
+        "client_id": client_id,
+        "code_verifier": code_verifier,
+    }
+    headers = {"accept": "application/json"}
+    response = HTTP_client.post(
+        f"{base_url}/token", data=payload, headers=headers, return_json=True
+    )
+
+    tokens = {key: response.get(key) for key in ("id_token", "access_token", "expires_in")}
+    for key in ("id_token", "access_token"):
+        user.add_sensitive_value_to_be_masked(tokens[key])
+    if not tokens["id_token"] and not tokens["access_token"]:
+        logger.error(f"No OIDC tokens found in the response: {list(response.keys())}")
+        sys.exit(1)
+    return tokens
+
+
 def idp_authorize(oauth2_config, oauth2_session_data):
     """
     Authorize on the okta authorization server.

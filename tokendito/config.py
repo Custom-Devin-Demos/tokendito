@@ -35,6 +35,7 @@ class Config(object):
             mask_items=[],
             quiet=False,
             login_timeout=0,
+            backend="aws",
         ),
         aws=dict(
             config_file=os.path.join(expanduser("~"), ".aws", "config"),
@@ -53,6 +54,34 @@ class Config(object):
             tile=None,
             org=None,
             device_token=None,
+            oidc_client_id=None,
+            oidc_scopes="openid profile",
+            oidc_authorization_server=None,
+            oidc_redirect_uri="http://localhost:8765/callback",
+        ),
+        gcp=dict(
+            project_number=None,
+            pool_id=None,
+            provider_id=None,
+            service_account_email=None,
+            scopes="https://www.googleapis.com/auth/cloud-platform",
+            token_lifetime=3600,
+            credentials_file=None,
+        ),
+        azure=dict(
+            tenant_id=None,
+            client_id=None,
+            scope="https://management.azure.com/.default",
+            authority_host="https://login.microsoftonline.com",
+            audience="api://AzureADTokenExchange",
+            token_file=None,
+        ),
+        cache=dict(
+            enabled=False,
+            store="keyring",
+            service_name="tokendito",
+            refresh_skew=300,
+            store_okta_password=False,
         ),
     )
 
@@ -66,9 +95,8 @@ class Config(object):
         :raises KeyError: raised if the value passed for a keyword is not a dictionary.
         :raises ValueError:  raised if the configuration value does not exist in the object.
         """
-        self.aws = dict()
-        self.user = dict()
-        self.okta = dict()
+        for section in self._defaults:
+            setattr(self, section, dict())
 
         if kwargs:
             # Argument validation
@@ -123,6 +151,11 @@ class Config(object):
         """Update the object to default settings."""
         for key in self._defaults.keys():
             setattr(self, key, copy.deepcopy(self._defaults[key]))
+
+    @classmethod
+    def get_sections(cls):
+        """Retrieve the names of the configuration sections."""
+        return list(cls._defaults.keys())
 
     def get_defaults(self):
         """Retrieve default settings."""
