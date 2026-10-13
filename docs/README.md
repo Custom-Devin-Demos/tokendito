@@ -13,6 +13,7 @@
   - [Precedence](#precedence)
   - [Environment variables and user configuration table](#environment-variables-and-user-configuration-table)
 - [Configuration file location](#configuration-file-location)
+- [Cloud backends](#cloud-backends)
 - [AWS Roles Discovery](#aws-roles-discovery)
 - [Supported MFA methods](#supported-mfa-methods)
 - [Installation](#installation)
@@ -222,6 +223,16 @@ options:
   --quiet               Suppress output.
   --login-timeout TIMEOUT     
                         Login timeout in seconds (default: 0 for disabled). You can also use the TOKENDITO_LOGIN_TIMEOUT environment variable.
+  --backend {aws,azure,gcp}
+                        Credential backend to use. Defaults to aws. You can also use the TOKENDITO_USER_BACKEND environment variable.
+  --okta-oidc-client-id OKTA_OIDC_CLIENT_ID
+                        Okta OIDC native application client ID used by OIDC-based backends.
+  --okta-oidc-scopes OKTA_OIDC_SCOPES
+                        Space separated OIDC scopes to request. Defaults to 'openid profile'.
+  --okta-oidc-authorization-server OKTA_OIDC_AUTHORIZATION_SERVER
+                        Okta custom authorization server ID (e.g. 'default'). Defaults to the Org authorization server.
+  --okta-oidc-redirect-uri OKTA_OIDC_REDIRECT_URI
+                        Redirect URI registered on the Okta OIDC application. It is never followed.
 ```
 
 Regarding the storage of the Okta password, we are fans of automation but do not recommend passing in the password to tokendito via plaintext or storing
@@ -265,6 +276,11 @@ The following table lists the environment variable and user configuration entry 
 | `--use-device-token` | `TOKENDITO_USER_USE_DEVICE_TOKEN`        | `user_use_device_token` |
 | `--quiet` | `TOKENDITO_USER_QUIET`        | `quiet` |
 | `--login-timeout` | `TOKENDITO_USER_LOGIN_TIMEOUT`        | `login_timeout` |
+| `--backend` | `TOKENDITO_USER_BACKEND`        | `user_backend` |
+| `--okta-oidc-client-id` | `TOKENDITO_OKTA_OIDC_CLIENT_ID`        | `okta_oidc_client_id` |
+| `--okta-oidc-scopes` | `TOKENDITO_OKTA_OIDC_SCOPES`        | `okta_oidc_scopes` |
+| `--okta-oidc-authorization-server` | `TOKENDITO_OKTA_OIDC_AUTHORIZATION_SERVER`        | `okta_oidc_authorization_server` |
+| `--okta-oidc-redirect-uri` | `TOKENDITO_OKTA_OIDC_REDIRECT_URI`        | `okta_oidc_redirect_uri` |
 
 ## Configuration file location
 
@@ -273,6 +289,18 @@ With Tokendito version 2.0 we changed the location of the configuration file fro
 - On Linux: `/home/<username>/.config/tokendito/tokendito.ini`
 - On MacOS: `/Users/<username>/Library/Preferences/tokendito/tokendito.ini`
 - On Windows: `%USERPROFILE%\AppData\Local\tokendito\tokendito.ini`
+
+## Cloud backends
+
+Tokendito authenticates to Okta once, and then hands off to a credential backend selected with
+`--backend`, `TOKENDITO_USER_BACKEND` or `user_backend` in [tokendito.ini](tokendito.ini.md).
+The default backend is `aws`.
+
+- [AWS](backends/aws.md) (`aws`, default): SAML -> STS `AssumeRoleWithSAML` -> `~/.aws/credentials`.
+- [GCP](backends/gcp.md) (`gcp`): Okta OIDC -> Workload Identity Federation.
+- [Azure](backends/azure.md) (`azure`): Okta OIDC -> Entra ID federated credentials.
+- [Credential cache](cache.md): OS keychain cache for issued credentials.
+- [credential_process and daemon mode](credential-process.md).
 
 ## AWS Roles Discovery
 
