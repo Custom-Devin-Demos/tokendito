@@ -92,6 +92,7 @@ def test_config_backend_sections():
         "store": "keyring",
         "service_name": "tokendito",
         "refresh_skew": 300,
+        "store_okta_password": False,
     }
 
 

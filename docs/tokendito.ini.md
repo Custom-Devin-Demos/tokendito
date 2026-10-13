@@ -57,6 +57,7 @@ environment variables. See [Cloud backends](README.md#cloud-backends).
 | `cache_store` | `keyring` | `keyring`, `file` or `none`. |
 | `cache_service_name` | `tokendito` | Keyring service name. |
 | `cache_refresh_skew` | `300` | Seconds before expiration at which credentials are refreshed. |
+| `cache_store_okta_password` | `false` | Store the Okta password in the credential cache under `okta:<username>` for `--credential-process` and `--daemon`. Requires `cache_enabled`. See [credential-process.md](credential-process.md) for the risks. |
 
 Example:
 
@@ -81,6 +82,7 @@ The following keys control the optional credential cache. See [cache.md](cache.m
 | `cache_store` | `keyring` | `keyring` (OS keychain, falling back to `file` if unavailable), `file` (0600 JSON files in the user cache directory) or `none`. |
 | `cache_service_name` | `tokendito` | Service name used for OS keychain entries. |
 | `cache_refresh_skew` | `300` | Seconds before expiry at which cached credentials are refreshed. |
+| `cache_store_okta_password` | `false` | Store the Okta password in the cache. Off by default; see [credential-process.md](credential-process.md#storing-the-okta-password). |
 
 ```
 [default]

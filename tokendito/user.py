@@ -60,6 +60,11 @@ def cmd_interface(args):
     # Early logging, in case the user requests debugging via env/CLI
     setup_early_logging(args)
 
+    if args.credential_process or args.daemon:
+        from tokendito import daemon
+
+        sys.exit(daemon.main(args))
+
     if args.multi_profiles:
         if args.aws_profile or ("TOKENDITO_AWS_PROFILE" in os.environ):
             logger.warning(
@@ -86,14 +91,50 @@ def cmd_interface(args):
 
 def process_args(args, skip_auth=False):
     """Process the args and allow for skipping auth with multiple profiles."""
+    backend, credentials = get_credentials(args, skip_auth)
+    backend.write(credentials)
+
+    save_device_token(args)
+
+    backend.display(credentials)
+
+
+def get_credentials(args, skip_auth=False):
+    """Load the configuration, authenticate to Okta and obtain the backend credentials.
+
+    Nothing is written to disk, except for what Okta authentication itself requires.
+
+    :param args: argparse namespace.
+    :param skip_auth: reuse the existing Okta session instead of authenticating again.
+    :return: tuple of (CredentialBackend instance, Credentials).
+    """
+    backend = load_backend(args)
+    return backend, authenticate_backend(args, backend, skip_auth)
+
+
+def load_backend(args):
+    """Load the configuration into the config singleton and create the selected backend.
+
+    :param args: argparse namespace.
+    :return: CredentialBackend instance.
+    """
     # Set some required initial values
     process_options(args)
 
     # Late logging (default)
     setup_logging(config.user)
 
-    backend = backends.get_backend(config.user["backend"])(config)
+    return backends.get_backend(config.user["backend"])(config)
 
+
+def authenticate_backend(args, backend, skip_auth=False):
+    """Validate the configuration, authenticate to Okta and call the backend.
+
+    :param args: argparse namespace.
+    :param backend: CredentialBackend instance.
+    :param skip_auth: reuse the existing Okta session instead of authenticating again.
+    :return: Credentials object.
+    """
     # Validate configuration
     validate_configuration_or_exit(config, backend)
 
@@ -105,12 +146,7 @@ def process_args(args, skip_auth=False):
     # get authentication and authorization cookies from okta
     _ = skip_auth or okta.access_control(config)
 
-    credentials = backend.authenticate()
-    backend.write(credentials)
-
-    save_device_token(args)
-
-    backend.display(credentials)
+    return backend.authenticate()
 
 
 def validate_configuration_or_exit(config, backend=None):
@@ -328,6 +364,28 @@ def parse_cli_args(args):
         choices=sorted(backends._BUILTIN),
         help="Credential backend to use. Defaults to aws. "
         "You can also use the TOKENDITO_USER_BACKEND environment variable.",
+    )
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--credential-process",
+        action="store_true",
+        default=False,
+        help="Print the credentials of --profile as a single JSON document on stdout, for use "
+        "as an AWS credential_process or an external credential source. Implies --quiet.",
+    )
+    mode_group.add_argument(
+        "--daemon",
+        action="store_true",
+        default=False,
+        help="Keep running, refreshing the credentials of --profile (or each --multi-profiles) "
+        "before they expire.",
+    )
+    parser.add_argument(
+        "--daemon-max-iterations",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
     backends.add_backend_arguments(parser)
@@ -1632,7 +1690,7 @@ def sanitize_config_values(config):
 
 
 _INTEGER_KEYS = (("gcp", "token_lifetime"), ("cache", "refresh_skew"))
-_BOOLEAN_KEYS = (("cache", "enabled"),)
+_BOOLEAN_KEYS = (("cache", "enabled"), ("cache", "store_okta_password"))
 
 
 def _to_bool(value):
