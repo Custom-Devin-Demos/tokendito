@@ -1057,3 +1057,144 @@ def test_saml2_authenticate(mocker):
     mocker.patch("tokendito.okta.send_saml_response", return_value=None)
     mocker.patch("tokendito.okta.idp_authenticate", return_value=None)
     assert okta.saml2_authenticate(pytest_config, auth_properties) is None
+
+
+@pytest.fixture
+def oidc_config():
+    """Return a Config object for OIDC tests."""
+    pytest_config = Config()
+    pytest_config.okta["org"] = "https://acme.okta.org/"
+    pytest_config.okta["oidc_client_id"] = "pytest_client_id"
+    return pytest_config
+
+
+def _oidc_mocks(requests_mock, base, location, token_response=None):
+    """Register /authorize and /token mocks."""
+    requests_mock.get(f"{base}/authorize", status_code=302, headers={"Location": location})
+    token_response = token_response or {
+        "id_token": "pytest.id.token",
+        "access_token": "pytest.access.token",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+    }
+    return requests_mock.post(f"{base}/token", json=token_response)
+
+
+@pytest.mark.parametrize(
+    "server, base",
+    [
+        (None, "https://acme.okta.org/oauth2/v1"),
+        ("default", "https://acme.okta.org/oauth2/default/v1"),
+    ],
+)
+def test_get_oidc_base_url(oidc_config, server, base):
+    """Test the Org and custom authorization server URLs."""
+    from tokendito import okta
+
+    oidc_config.okta["oidc_authorization_server"] = server
+    assert okta.get_oidc_base_url(oidc_config) == base
+
+
+def test_get_oidc_tokens(mocker, requests_mock, oidc_config):
+    """Test the OIDC authorization code + PKCE flow."""
+    from urllib.parse import parse_qs
+    from urllib.parse import urlparse
+
+    from tokendito import okta
+    from tokendito import user
+
+    oidc_config.okta["oidc_authorization_server"] = "default"
+    base = "https://acme.okta.org/oauth2/default/v1"
+    mocker.patch("tokendito.okta.get_oauth2_state", return_value="pytest_state")
+    mocker.patch("tokendito.okta.get_pkce_code_verifier", return_value="pytest_verifier")
+    cookies = requests.cookies.RequestsCookieJar()
+    cookies.set("sessionToken", "pytest_session_token")
+    mocker.patch.object(HTTP_client.session, "cookies", cookies)
+    location = "http://localhost:8765/callback?code=pytest_code&state=pytest_state"
+    token_mock = _oidc_mocks(requests_mock, base, location)
+
+    tokens = okta.get_oidc_tokens(oidc_config)
+    assert tokens == {
+        "id_token": "pytest.id.token",
+        "access_token": "pytest.access.token",
+        "expires_in": 3600,
+    }
+
+    authorize = requests_mock.request_history[0]
+    query = parse_qs(urlparse(authorize.url).query)
+    assert query["client_id"] == ["pytest_client_id"]
+    assert query["prompt"] == ["none"]
+    assert query["response_type"] == ["code"]
+    assert query["scope"] == ["openid profile"]
+    assert query["redirect_uri"] == ["http://localhost:8765/callback"]
+    assert query["code_challenge"] == [okta.get_pkce_code_challenge("pytest_verifier")]
+    assert query["code_challenge_method"] == ["S256"]
+    assert query["sessionToken"] == ["pytest_session_token"]
+
+    body = parse_qs(token_mock.last_request.text)
+    assert body["grant_type"] == ["authorization_code"]
+    assert body["code"] == ["pytest_code"]
+    assert body["code_verifier"] == ["pytest_verifier"]
+    assert body["client_id"] == ["pytest_client_id"]
+
+    assert "pytest.id.token" in user.mask_items
+    assert "pytest.access.token" in user.mask_items
+
+
+def test_get_oidc_tokens_client_id_fallback(mocker, requests_mock, oidc_config):
+    """Test that the existing client ID discovery is used when no OIDC client ID is set."""
+    from tokendito import okta
+
+    oidc_config.okta["oidc_client_id"] = None
+    mocker.patch("tokendito.okta.get_client_id", return_value="discovered_client_id")
+    mocker.patch("tokendito.okta.get_oauth2_state", return_value="s")
+    base = "https://acme.okta.org/oauth2/v1"
+    _oidc_mocks(requests_mock, base, "http://localhost:8765/callback?code=c&state=s")
+
+    okta.get_oidc_tokens(oidc_config)
+    assert "client_id=discovered_client_id" in requests_mock.request_history[0].url
+
+
+def test_get_oidc_client_id_missing(mocker, oidc_config):
+    """Test that a missing client ID exits."""
+    from tokendito import okta
+
+    oidc_config.okta["oidc_client_id"] = None
+    mocker.patch("tokendito.okta.get_client_id", return_value=None)
+    with pytest.raises(SystemExit) as err:
+        okta.get_oidc_client_id(oidc_config)
+    assert err.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://localhost:8765/callback?error=login_required&error_description=No+session&state=s",
+        "http://localhost:8765/callback?code=c&state=other",
+        "http://localhost:8765/callback?state=s",
+        "",
+    ],
+)
+def test_get_oidc_tokens_authorize_errors(mocker, requests_mock, oidc_config, location):
+    """Test that /authorize errors exit."""
+    from tokendito import okta
+
+    mocker.patch("tokendito.okta.get_oauth2_state", return_value="s")
+    _oidc_mocks(requests_mock, "https://acme.okta.org/oauth2/v1", location)
+
+    with pytest.raises(SystemExit) as err:
+        okta.get_oidc_tokens(oidc_config)
+    assert err.value.code == 1
+
+
+def test_get_oidc_tokens_no_tokens(mocker, requests_mock, oidc_config):
+    """Test that a /token response without tokens exits."""
+    from tokendito import okta
+
+    mocker.patch("tokendito.okta.get_oauth2_state", return_value="s")
+    location = "http://localhost:8765/callback?code=c&state=s"
+    _oidc_mocks(requests_mock, "https://acme.okta.org/oauth2/v1", location, {"error": "x"})
+
+    with pytest.raises(SystemExit) as err:
+        okta.get_oidc_tokens(oidc_config)
+    assert err.value.code == 1
