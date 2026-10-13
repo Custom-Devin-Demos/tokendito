@@ -27,3 +27,21 @@ tokendito --multi-profiles my_prod_okta_tile --multi-profiles my_dev_okta_tile
 This will authenticate once and then iterate through each profile, writing AWS credentials to `~/.aws/credentials` using the tokendito profile name as the AWS profile name (e.g. `my_prod_okta_tile`, `my_dev_okta_tile`). See the [multi-profile usage](README.md#multi-profile-usage) section for more details.
 
 The `login_timeout` option controls how long tokendito will wait for username and password input before timing out. Once the user starts typing, the timeout is disabled. The default is 0 (disabled). Set to a positive value (in seconds) to enable timeout.
+
+## Credential cache
+
+The following keys control the optional credential cache. See [cache.md](cache.md) for details on where data is stored and the security implications.
+
+| Key | Default | Description |
+|---|---|---|
+| `cache_enabled` | `false` | Enable caching of credentials between invocations. |
+| `cache_store` | `keyring` | `keyring` (OS keychain, falling back to `file` if unavailable), `file` (0600 JSON files in the user cache directory) or `none`. |
+| `cache_service_name` | `tokendito` | Service name used for OS keychain entries. |
+| `cache_refresh_skew` | `300` | Seconds before expiry at which cached credentials are refreshed. |
+
+```
+[default]
+okta_org = https://acme.okta.com/
+cache_enabled = true
+cache_store = keyring
+```
